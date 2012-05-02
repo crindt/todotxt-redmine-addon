@@ -1,0 +1,146 @@
+#!/usr/bin/perl
+
+use XML::Simple;
+use LWP::Simple;
+use Encode;
+use Getopt::Long;
+use IO::All;
+use Date::Format;
+use Date::Parse;
+
+my $user;
+my $redmine = $ENV{'REDMINE_URL'}; # specify your redmine url
+my $apikey = $ENV{'REDMINE_API_KEY'}; #specify your redmine apikey = '';
+my $limit = 100;
+my $minpri = 5;
+my $verbose;
+my $todo = join(' ',
+                ($ENV{'TODOTXT_CMD'} || die 'TODOTXT_CMD must be specified'),
+                '-p', # turn off colors
+                "-d ".$ENV{'TODOTXT_CFG_FILE'}
+    );
+
+my $res = GetOptions(
+    'apikey=s' => \$apikey,
+    'limit=i' => \$limit,
+    'minpri=i' => \$minpri,
+    'user=i' => \$user,
+    'verbose|v' => sub { $verbose++ }
+    );
+
+my @issues = ();
+my %parents = ();
+my $page = 0;
+
+if ( @ARGV ) {
+    # specific issues...
+
+    for my $id ( @ARGV ) {
+        my $url = "$redmine/issues/$id.xml?key=$apikey";
+        print STDERR $url."\n" if $verbose;
+        my $doc = get $url;
+        my $i = XMLin( $doc );
+
+        push @issues, $i;
+    }
+} 
+
+if ( $user ) {
+    # get all issues for user
+    
+    my $empty = 0;
+    do {
+        my $url = "$redmine/issues.xml?assigned_to_id=$user&key=$apikey&offset=".(100*$page)."&limit=100";
+        print STDERR $url."\n" if $verbose;;
+        $doc = get $url;
+        
+        $tree = XMLin( $doc );
+        
+        my $is = $tree->{issue};
+        
+        foreach my $ik ( grep { $is->{$_}->{priority}->{id} >= $minpri}
+                         keys %{$is} ) {
+            my $i = $is->{$ik};
+            $i->{id} = $ik;
+            push @issues, $i;
+        }
+        $empty = 100 - scalar keys %{$is};
+        $page++;
+    } while ( not $empty );
+}
+
+# issues should now contain everything to be synced
+
+# Read current todo list
+my $cmd = "$todo list|grep -i '+ctmlabs'|grep -i '+issue#'|";
+print STDERR "$cmd\n" if $verbose;
+my $td = io($cmd);
+
+my %todo = ();
+while( $_ = $td->getline() ) {
+    chomp();
+    /^(\d+)\s+((\([a-zA-Z]\))\s+)*(.*)$/ && do {
+        # item found
+        my $t = {
+            line => $1,
+            priority => $3,
+            detail => $4
+        };
+        my $stampstr;
+        if ( ($stampstr) = $t->{detail} =~ /LAST:([^\s]{15})/ ) {
+            $t->{last} = str2time($stampstr);
+        }
+        if ( ($issue) = $t->{detail} =~ /\+issue#(\d+)/ ) {
+            $t->{issue} = $issue;
+        } else {
+            die "Bad todo issue string $detail\n";
+        }
+
+        $todo{$t->{issue}} = $t;
+    }
+}
+
+my $modstamp = time2str("%Y%m%dT%H%M%S", time);
+    
+foreach my $i ( 
+    sort { ( $b->{priority}->{id} <=> $a->{priority}->{id} ) 
+               || ( $b->{updated_on} cmp $a->{updated_on} ) 
+    } 
+    grep { scalar( $_->{children} ) <= 0 }
+    @issues ) {
+
+    my $t;
+    $redmine_stamp = str2time($i->{updated_on});
+    my $pri = ('M'..'Z')[7-($i->{priority}->{id})];
+    if ( defined( $t = $todo{$i->{id}} ) ) {
+        # already have matching issue in list, need to update
+        if ( $redmine_stamp > $t->{last} ) {
+            # redmine is newer, update the detail
+            my $newdetail = $t->{detail};
+            $newdetail =~ s/LAST:[^\s]{15}//;  # remove stamp
+
+            my $cmd = "$todo replace $t->{line} '$newdetail LAST:$modstamp'";
+            print STDERR "$cmd\n" if $verbose;
+            system($cmd);
+            my $cmd = "$todo pri $t->{line} $pri";
+            print STDERR "$cmd\n" if $verbose;
+            system($cmd);
+            
+        } elsif ( $redmine_stamp <= $t->{last} ) {
+            # redmine is older, should push update to redmine?
+        }
+    } else {
+        # not in the list, update it.
+
+        my $cmd = "$todo add '($pri) ".decode_utf8($i->{subject})." +ctmlabs +issue#$i->{id} LAST:$redmine_stamp";
+        print STDERR "$cmd\n" if $verbose;
+        #system( $cmd );
+    }
+}
+
+# TODO: synchronize anything already in todo list with corresponding redmine tasks
+
+# TODO: scan done.txt for any redmine tasks marked done and push that up to redmine
+
+1;
+
