@@ -32,6 +32,21 @@ my @issues = ();
 my %parents = ();
 my $page = 0;
 
+print STDERR join( "\n", @ARGV )."\n" if $verbose;
+
+my $cmdname = shift @ARGV;
+
+my $cmd = shift @ARGV;
+
+$_ = $cmd;
+
+if ( $cmd =~ /sync/ ) {
+    # This is what we expect
+} else {
+    print "redmine [options] action\n";
+    exit;
+}
+
 if ( @ARGV ) {
     # specific issues...
 
